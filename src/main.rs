@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::fs;
 use std::process::Command;
 use std::str;
+use std::io::{self, Write};
 
 const SYSTEM_PROMPT: &str = r#"You are an expert software engineer that generates concise, one-line Git commit messages based on the provided diffs.
 Review the provided context and diffs which are about to be committed to a git repo.
@@ -85,19 +86,6 @@ async fn main() -> Result<()> {
     if let Some(api_key) = &config.openai_api_key {
         std::env::set_var("OPENAI_API_KEY", api_key);
     }
-
-    println!(
-        "HTTP_PROXY: {}",
-        std::env::var("http_proxy").unwrap_or_default()
-    );
-    println!(
-        "OPENAI_BASE_URL: {}",
-        std::env::var("OPENAI_BASE_URL").unwrap_or_default()
-    );
-    println!(
-        "OPENAI_API_KEY: {}",
-        std::env::var("OPENAI_API_KEY").unwrap_or_default()
-    );
 
     run(&config).await
 }
@@ -187,6 +175,21 @@ async fn generate_commit_message(
     language: Option<&str>,
 ) -> Result<(String, Option<CompletionUsage>)> {
     let user_content = format!("# Diffs:\n{}", diffs);
+
+    const MAX_CONTENT_LENGTH: usize = 8000;
+
+    if user_content.len() > MAX_CONTENT_LENGTH {
+        print!(
+            "The staged diff is large ({} characters). It may consume a lot of tokens and take a long time. Do you want to continue? (y/N) ",
+            user_content.len()
+        );
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            return Err(anyhow!("Aborted by user."));
+        }
+    }
 
     let language_instruction = if let Some(lang) = language {
         format!("\n- Is written in {}.", lang)
