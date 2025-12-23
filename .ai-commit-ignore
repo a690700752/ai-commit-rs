@@ -1,0 +1,10 @@
+# Files to ignore when generating commit messages
+
+# Lock files
+*.lock
+
+# Log files
+*.log
+
+# Build artifacts
+target/

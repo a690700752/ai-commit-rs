@@ -4,9 +4,10 @@ use async_openai::types::chat::{
     CreateChatCompletionRequestArgs,
 };
 use async_openai::Client;
-use git2::{Commit, ObjectType, Patch, Repository, Signature};
-use regex::Regex;
-use std::path::Path;
+use glob::Pattern;
+use std::fs;
+use std::process::Command;
+use std::str;
 
 const SYSTEM_PROMPT: &str = r#"You are an expert software engineer that generates concise, one-line Git commit messages based on the provided diffs.
 Review the provided context and diffs which are about to be committed to a git repo.
@@ -21,57 +22,96 @@ Ensure the commit message:
 
 Reply only with the one-line commit message, without any additional text, explanations, or line breaks."#;
 
+const IGNORE_FILE_NAME: &str = ".ai-commit-ignore";
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv_override().ok();
+    // print http_proxy env
+    println!(
+        "HTTP_PROXY: {}",
+        std::env::var("http_proxy").unwrap_or_default()
+    );
+    println!(
+        "OPENAI_BASE_URL: {}",
+        std::env::var("OPENAI_BASE_URL").unwrap_or_default()
+    );
+    println!(
+        "OPENAI_API_KEY: {}",
+        std::env::var("OPENAI_API_KEY").unwrap_or_default()
+    );
     run().await
 }
 
 async fn run() -> Result<()> {
-    let repo = Repository::open(".")?;
-    let diffs = get_staged_diffs(&repo, Some(r".*\.lock$|.*\.log$|/target/"))?;
+    let ignore_patterns = read_ignore_patterns(IGNORE_FILE_NAME).unwrap_or_else(|_| Vec::new());
+    let diffs = get_staged_diffs(Some(&ignore_patterns))?;
 
     if diffs.is_empty() {
         println!("No staged changes to commit after filtering.");
         return Ok(());
     }
 
-    println!("# Diffs:\n{}", diffs);
+    // println!("# Diffs:\n{}", diffs);
 
     let commit_msg = generate_commit_message(&diffs).await?;
     println!("\nGenerated commit message: {}", commit_msg);
 
-    let (commit_hash, commit_message) = perform_commit(&repo, &commit_msg)?;
+    let (commit_hash, commit_message) = perform_commit(&commit_msg)?;
     println!("Commit {} {}", commit_hash, commit_message);
 
     Ok(())
 }
 
-fn get_staged_diffs(repo: &Repository, filter_regex: Option<&str>) -> Result<String> {
-    let head_tree = repo
-        .head()
-        .ok()
-        .and_then(|head| head.peel_to_commit().ok())
-        .and_then(|commit| commit.tree().ok());
-    let diff = repo.diff_tree_to_index(head_tree.as_ref(), None, None)?;
-    let regex = filter_regex.map(Regex::new).transpose()?;
+fn read_ignore_patterns(file_path: &str) -> Result<Vec<Pattern>> {
+    let content = fs::read_to_string(file_path)?;
+    content
+        .lines()
+        .map(|line| Pattern::new(line).map_err(|e| anyhow!(e)))
+        .collect()
+}
 
-    let mut diff_text = String::new();
-    for i in 0..diff.deltas().len() {
-        let delta = diff.deltas().nth(i).unwrap();
-        if let Some(re) = &regex {
-            let path = delta.new_file().path().unwrap_or(Path::new(""));
-            if re.is_match(path.to_str().unwrap_or_default()) {
-                continue;
-            }
-        }
-        let patch = Patch::from_diff(&diff, i)?;
-        if let Some(mut patch) = patch {
-            let buf = patch.to_buf()?;
-            diff_text.push_str(std::str::from_utf8(buf.as_ref()).unwrap_or(""));
-        }
+fn get_staged_diffs(filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
+    let output = Command::new("git")
+        .args(["diff", "--staged", "--name-only"])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Failed to get staged files: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
-    Ok(diff_text)
+
+    let staged_files = str::from_utf8(&output.stdout)?.lines();
+
+    let filtered_files: Vec<&str> = staged_files
+        .filter(|file| {
+            if let Some(patterns) = filter_patterns {
+                !patterns.iter().any(|p| p.matches(file))
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if filtered_files.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut diff_command = Command::new("git");
+    diff_command.arg("diff").arg("--staged").arg("--");
+    diff_command.args(&filtered_files);
+
+    let diff_output = diff_command.output()?;
+
+    if !diff_output.status.success() {
+        return Err(anyhow!(
+            "Failed to get staged diffs: {}",
+            String::from_utf8_lossy(&diff_output.stderr)
+        ));
+    }
+
+    String::from_utf8(diff_output.stdout).map_err(|e| anyhow!(e))
 }
 
 async fn generate_commit_message(diffs: &str) -> Result<String> {
@@ -79,7 +119,7 @@ async fn generate_commit_message(diffs: &str) -> Result<String> {
     let user_content = format!("# Diffs:\n{}", diffs);
 
     let request = CreateChatCompletionRequestArgs::default()
-        .model("gpt-3.5-turbo")
+        .model("deepseek-v3-1")
         .messages([
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(SYSTEM_PROMPT)
@@ -103,40 +143,35 @@ async fn generate_commit_message(diffs: &str) -> Result<String> {
     }
 }
 
-fn perform_commit(repo: &Repository, message: &str) -> Result<(String, String)> {
-    let signature = Signature::now("ai-commit-rs", "ai-commit-rs@example.com")?;
-    let mut index = repo.index()?;
-    let tree_oid = index.write_tree()?;
-    let tree = repo.find_tree(tree_oid)?;
+fn perform_commit(message: &str) -> Result<(String, String)> {
+    let output = Command::new("git")
+        .args(["commit", "--no-verify", "-m", message])
+        .output()?;
 
-    let parent_commit = find_head_commit(repo).ok();
-    let parents: Vec<&Commit> = parent_commit.iter().collect();
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Failed to commit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
 
-    let commit_oid = repo.commit(
-        Some("HEAD"),
-        &signature,
-        &signature,
-        message,
-        &tree,
-        &parents,
-    )?;
+    let rev_parse_output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()?;
 
-    let short_hash = repo
-        .find_object(commit_oid, Some(ObjectType::Commit))?
-        .short_id()?
-        .as_str()
-        .unwrap_or_default()
+    if !rev_parse_output.status.success() {
+        return Err(anyhow!(
+            "Failed to get commit hash: {}",
+            String::from_utf8_lossy(&rev_parse_output.stderr)
+        ));
+    }
+
+    let short_hash = String::from_utf8(rev_parse_output.stdout)?
+        .trim()
         .to_string();
 
     Ok((
         short_hash,
         message.lines().next().unwrap_or_default().to_string(),
     ))
-}
-
-fn find_head_commit(repo: &Repository) -> Result<Commit> {
-    let head_ref = repo.head()?;
-    head_ref
-        .peel_to_commit()
-        .map_err(|e| anyhow!("Failed to peel head to commit: {}", e))
 }
