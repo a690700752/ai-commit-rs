@@ -85,6 +85,13 @@ fn load_config() -> Result<Config> {
     let config: Config = toml::from_str(&config_str)?;
     Ok(config)
 }
+
+fn log(message: &str) {
+    if std::env::var("AI_COMMIT_DEBUG").is_ok() {
+        println!("[DEBUG] {}", message);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -112,7 +119,9 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
         ));
     }
 
-    let git_root = String::from_utf8(git_root_output.stdout)?.trim().to_string();
+    let git_root = String::from_utf8(git_root_output.stdout)?
+        .trim()
+        .to_string();
 
     let ignore_patterns = config
         .ignore
@@ -149,6 +158,7 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
 }
 
 fn get_staged_diffs(git_root: &str, filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
+    log("Executing: git diff --staged --name-only");
     let output = Command::new("git")
         .current_dir(git_root)
         .args(["diff", "--staged", "--name-only"])
@@ -161,16 +171,24 @@ fn get_staged_diffs(git_root: &str, filter_patterns: Option<&Vec<Pattern>>) -> R
     }
 
     let staged_files = str::from_utf8(&output.stdout)?.lines();
+    log(&format!("Found staged files: {:?}", staged_files));
 
     let filtered_files: Vec<&str> = staged_files
+        .into_iter()
         .filter(|file| {
             if let Some(patterns) = filter_patterns {
-                !patterns.iter().any(|p| p.matches(file))
+                let matched = patterns.iter().any(|p| p.matches(file));
+                if matched {
+                    log(&format!("Ignoring file matching pattern: {}", file));
+                }
+                !matched
             } else {
                 true
             }
         })
         .collect();
+
+    log(&format!("Files after filtering: {:?}", filtered_files));
 
     if filtered_files.is_empty() {
         return Ok(String::new());
@@ -180,6 +198,8 @@ fn get_staged_diffs(git_root: &str, filter_patterns: Option<&Vec<Pattern>>) -> R
     diff_command.current_dir(git_root);
     diff_command.arg("diff").arg("--staged").arg("--");
     diff_command.args(&filtered_files);
+
+    log(&format!("Executing: {:?}", diff_command));
 
     let diff_output = diff_command.output()?;
 
