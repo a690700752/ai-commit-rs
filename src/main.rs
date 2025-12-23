@@ -101,13 +101,26 @@ async fn main() -> Result<()> {
 }
 
 async fn run(config: &Config, no_verify: bool) -> Result<()> {
+    let git_root_output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()?;
+
+    if !git_root_output.status.success() {
+        return Err(anyhow!(
+            "Not a git repository or git not found: {}",
+            String::from_utf8_lossy(&git_root_output.stderr)
+        ));
+    }
+
+    let git_root = String::from_utf8(git_root_output.stdout)?.trim().to_string();
+
     let ignore_patterns = config
         .ignore
         .iter()
         .map(|s| Pattern::new(s))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let diffs = get_staged_diffs(Some(&ignore_patterns))?;
+    let diffs = get_staged_diffs(&git_root, Some(&ignore_patterns))?;
 
     if diffs.is_empty() {
         println!("No staged changes to commit after filtering.");
@@ -129,14 +142,15 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
         );
     }
 
-    let (commit_hash, commit_message) = perform_commit(&commit_msg, no_verify)?;
+    let (commit_hash, commit_message) = perform_commit(&git_root, &commit_msg, no_verify)?;
     println!("Commit {} {}", commit_hash, commit_message);
 
     Ok(())
 }
 
-fn get_staged_diffs(filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
+fn get_staged_diffs(git_root: &str, filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
     let output = Command::new("git")
+        .current_dir(git_root)
         .args(["diff", "--staged", "--name-only"])
         .output()?;
     if !output.status.success() {
@@ -163,6 +177,7 @@ fn get_staged_diffs(filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
     }
 
     let mut diff_command = Command::new("git");
+    diff_command.current_dir(git_root);
     diff_command.arg("diff").arg("--staged").arg("--");
     diff_command.args(&filtered_files);
 
@@ -177,7 +192,6 @@ fn get_staged_diffs(filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
 
     String::from_utf8(diff_output.stdout).map_err(|e| anyhow!(e))
 }
-
 async fn generate_commit_message(
     client: &Client<impl async_openai::config::Config>,
     diffs: &str,
@@ -234,14 +248,17 @@ async fn generate_commit_message(
     }
 }
 
-fn perform_commit(message: &str, no_verify: bool) -> Result<(String, String)> {
+fn perform_commit(git_root: &str, message: &str, no_verify: bool) -> Result<(String, String)> {
     let mut command_args = vec!["commit"];
     if no_verify {
         command_args.push("--no-verify");
     }
     command_args.extend_from_slice(&["-m", message]);
 
-    let output = Command::new("git").args(command_args).output()?;
+    let output = Command::new("git")
+        .current_dir(git_root)
+        .args(command_args)
+        .output()?;
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -251,6 +268,7 @@ fn perform_commit(message: &str, no_verify: bool) -> Result<(String, String)> {
     }
 
     let rev_parse_output = Command::new("git")
+        .current_dir(git_root)
         .args(["rev-parse", "--short", "HEAD"])
         .output()?;
 
