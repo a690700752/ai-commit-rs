@@ -6,13 +6,13 @@ use async_openai::{
     },
     Client,
 };
+use clap::Parser;
 use glob::Pattern;
 use serde::Deserialize;
 use std::fs;
 use std::io::{self, Write};
 use std::process::Command;
 use std::str;
-use clap::Parser;
 
 const SYSTEM_PROMPT: &str = r#"You are an expert software engineer that generates concise, one-line Git commit messages based on the provided diffs.
 Review the provided context and diffs which are about to be committed to a git repo.
@@ -223,7 +223,7 @@ async fn generate_commit_message(
         ])
         .build()?;
 
-    println!("Waiting for LLM to generate commit message...");
+    println!("Waiting for {} to generate commit message...", model);
     let response = client.chat().create(request).await?;
 
     if let Some(choice) = response.choices.into_iter().next() {
@@ -241,9 +241,7 @@ fn perform_commit(message: &str, no_verify: bool) -> Result<(String, String)> {
     }
     command_args.extend_from_slice(&["-m", message]);
 
-    let output = Command::new("git")
-        .args(command_args)
-        .output()?;
+    let output = Command::new("git").args(command_args).output()?;
 
     if !output.status.success() {
         return Err(anyhow!(
