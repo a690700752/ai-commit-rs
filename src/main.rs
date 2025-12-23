@@ -158,10 +158,10 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
 }
 
 fn get_staged_diffs(git_root: &str, filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
-    log("Executing: git diff --staged --name-only");
+    log("Executing: git diff --staged --name-only -z");
     let output = Command::new("git")
         .current_dir(git_root)
-        .args(["diff", "--staged", "--name-only"])
+        .args(["diff", "--staged", "--name-only", "-z"])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -170,7 +170,8 @@ fn get_staged_diffs(git_root: &str, filter_patterns: Option<&Vec<Pattern>>) -> R
         ));
     }
 
-    let staged_files = str::from_utf8(&output.stdout)?.lines();
+    let stdout = str::from_utf8(&output.stdout)?;
+    let staged_files: Vec<&str> = stdout.split('\0').filter(|s| !s.is_empty()).collect();
     log(&format!("Found staged files: {:?}", staged_files));
 
     let filtered_files: Vec<&str> = staged_files
