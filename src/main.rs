@@ -9,9 +9,10 @@ use async_openai::{
 use glob::Pattern;
 use serde::Deserialize;
 use std::fs;
+use std::io::{self, Write};
 use std::process::Command;
 use std::str;
-use std::io::{self, Write};
+use clap::Parser;
 
 const SYSTEM_PROMPT: &str = r#"You are an expert software engineer that generates concise, one-line Git commit messages based on the provided diffs.
 Review the provided context and diffs which are about to be committed to a git repo.
@@ -63,6 +64,14 @@ impl Default for Config {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Do not run git commit hooks
+    #[arg(long)]
+    no_verify: bool,
+}
+
 fn load_config() -> Result<Config> {
     let config_path = dirs::home_dir()
         .ok_or_else(|| anyhow!("Failed to find home directory"))?
@@ -78,6 +87,7 @@ fn load_config() -> Result<Config> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
     let config = load_config()?;
 
     if let Some(base_url) = &config.openai_base_url {
@@ -87,10 +97,10 @@ async fn main() -> Result<()> {
         std::env::set_var("OPENAI_API_KEY", api_key);
     }
 
-    run(&config).await
+    run(&config, cli.no_verify).await
 }
 
-async fn run(config: &Config) -> Result<()> {
+async fn run(config: &Config, no_verify: bool) -> Result<()> {
     let ignore_patterns = config
         .ignore
         .iter()
@@ -119,7 +129,7 @@ async fn run(config: &Config) -> Result<()> {
         );
     }
 
-    let (commit_hash, commit_message) = perform_commit(&commit_msg)?;
+    let (commit_hash, commit_message) = perform_commit(&commit_msg, no_verify)?;
     println!("Commit {} {}", commit_hash, commit_message);
 
     Ok(())
@@ -224,9 +234,15 @@ async fn generate_commit_message(
     }
 }
 
-fn perform_commit(message: &str) -> Result<(String, String)> {
+fn perform_commit(message: &str, no_verify: bool) -> Result<(String, String)> {
+    let mut command_args = vec!["commit"];
+    if no_verify {
+        command_args.push("--no-verify");
+    }
+    command_args.extend_from_slice(&["-m", message]);
+
     let output = Command::new("git")
-        .args(["commit", "--no-verify", "-m", message])
+        .args(command_args)
         .output()?;
 
     if !output.status.success() {
