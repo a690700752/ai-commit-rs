@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use async_openai::{
     types::chat::{
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs,
+        CompletionUsage, CreateChatCompletionRequestArgs,
     },
     Client,
 };
@@ -121,8 +121,15 @@ async fn run(config: &Config) -> Result<()> {
 
     let client = Client::new();
 
-    let commit_msg = generate_commit_message(&client, &diffs, model, language).await?;
+    let (commit_msg, usage) = generate_commit_message(&client, &diffs, model, language).await?;
     // println!("\nGenerated commit message: {}", commit_msg);
+
+    if let Some(usage) = usage {
+        println!(
+            "Tokens used: {}, input tokens: {}, output tokens: {}",
+            usage.total_tokens, usage.prompt_tokens, usage.completion_tokens
+        );
+    }
 
     let (commit_hash, commit_message) = perform_commit(&commit_msg)?;
     println!("Commit {} {}", commit_hash, commit_message);
@@ -178,7 +185,7 @@ async fn generate_commit_message(
     diffs: &str,
     model: &str,
     language: Option<&str>,
-) -> Result<String> {
+) -> Result<(String, Option<CompletionUsage>)> {
     let user_content = format!("# Diffs:\n{}", diffs);
 
     let language_instruction = if let Some(lang) = language {
@@ -208,7 +215,7 @@ async fn generate_commit_message(
 
     if let Some(choice) = response.choices.into_iter().next() {
         let message = choice.message.content.unwrap_or_default();
-        Ok(message.trim().trim_matches('"').to_string())
+        Ok((message.trim().trim_matches('"').to_string(), response.usage))
     } else {
         Err(anyhow!("Failed to get commit message from LLM"))
     }
