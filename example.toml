@@ -1,0 +1,26 @@
+# Example configuration for ai-commit-rs
+# Place this file at ~/.ai-commit-rs.toml
+
+# (Optional) OpenAI API base URL. Defaults to https://api.openai.com/v1.
+# openai_base_url = "https://api.openai.com/v1"
+
+# (Optional) OpenAI API key. Can also be set with the OPENAI_API_KEY environment variable.
+# openai_api_key = "sk-..."
+
+# (Optional) The model to use for generating commit messages.
+# Defaults to "deepseek-v3-1".
+model = "deepseek-v3-1"
+
+# (Optional) The language for the commit message.
+# e.g., "Chinese", "Spanish"
+language = "English"
+
+# (Optional) A list of glob patterns for files to ignore when generating the diff.
+# The files will still be included in the commit.
+ignore = [
+    "*.lock",
+    "*.log",
+    "target/",
+    "dist/",
+    "build/"
+]

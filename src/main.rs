@@ -1,10 +1,13 @@
 use anyhow::{anyhow, Result};
-use async_openai::types::chat::{
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    CreateChatCompletionRequestArgs,
+use async_openai::{
+    types::chat::{
+        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+        CreateChatCompletionRequestArgs,
+    },
+    Client,
 };
-use async_openai::Client;
 use glob::Pattern;
+use serde::Deserialize;
 use std::fs;
 use std::process::Command;
 use std::str;
@@ -16,18 +19,73 @@ Generate a one-line commit message for those changes.
 The commit message should be structured as follows: <type>: <description>
 Use these for <type>: fix, feat, build, chore, ci, docs, style, refactor, perf, test
 
-Ensure the commit message:
+Ensure the commit message:{language_instruction}
 - Is in the imperative mood (e.g., "add feature" not "added feature" or "adding feature").
 - Does not exceed 72 characters.
 
 Reply only with the one-line commit message, without any additional text, explanations, or line breaks."#;
 
-const IGNORE_FILE_NAME: &str = ".ai-commit-ignore";
+#[derive(Debug, Deserialize)]
+struct Config {
+    openai_base_url: Option<String>,
+    openai_api_key: Option<String>,
+    #[serde(default = "default_model")]
+    model: String,
+    language: Option<String>,
+    #[serde(default = "default_ignore")]
+    ignore: Vec<String>,
+}
 
+fn default_model() -> String {
+    "deepseek-v3-1".to_string()
+}
+
+fn default_ignore() -> Vec<String> {
+    vec![
+        "*lock*".to_string(),
+        "*.log".to_string(),
+        "target/".to_string(),
+        "dist/".to_string(),
+        "build/".to_string(),
+    ]
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            openai_base_url: None,
+            openai_api_key: None,
+            model: default_model(),
+            language: None,
+            ignore: default_ignore(),
+        }
+    }
+}
+
+fn load_config() -> Result<Config> {
+    let config_path = dirs::home_dir()
+        .ok_or_else(|| anyhow!("Failed to find home directory"))?
+        .join(".ai-commit-rs.toml");
+
+    if !config_path.exists() {
+        return Ok(Config::default());
+    }
+
+    let config_str = fs::read_to_string(config_path)?;
+    let config: Config = toml::from_str(&config_str)?;
+    Ok(config)
+}
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::dotenv_override().ok();
-    // print http_proxy env
+    let config = load_config()?;
+
+    if let Some(base_url) = &config.openai_base_url {
+        std::env::set_var("OPENAI_BASE_URL", base_url);
+    }
+    if let Some(api_key) = &config.openai_api_key {
+        std::env::set_var("OPENAI_API_KEY", api_key);
+    }
+
     println!(
         "HTTP_PROXY: {}",
         std::env::var("http_proxy").unwrap_or_default()
@@ -40,11 +98,17 @@ async fn main() -> Result<()> {
         "OPENAI_API_KEY: {}",
         std::env::var("OPENAI_API_KEY").unwrap_or_default()
     );
-    run().await
+
+    run(&config).await
 }
 
-async fn run() -> Result<()> {
-    let ignore_patterns = read_ignore_patterns(IGNORE_FILE_NAME).unwrap_or_else(|_| Vec::new());
+async fn run(config: &Config) -> Result<()> {
+    let ignore_patterns = config
+        .ignore
+        .iter()
+        .map(|s| Pattern::new(s))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let diffs = get_staged_diffs(Some(&ignore_patterns))?;
 
     if diffs.is_empty() {
@@ -52,23 +116,18 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
-    // println!("# Diffs:\n{}", diffs);
+    let model = &config.model;
+    let language = config.language.as_deref();
 
-    let commit_msg = generate_commit_message(&diffs).await?;
-    println!("\nGenerated commit message: {}", commit_msg);
+    let client = Client::new();
+
+    let commit_msg = generate_commit_message(&client, &diffs, model, language).await?;
+    // println!("\nGenerated commit message: {}", commit_msg);
 
     let (commit_hash, commit_message) = perform_commit(&commit_msg)?;
     println!("Commit {} {}", commit_hash, commit_message);
 
     Ok(())
-}
-
-fn read_ignore_patterns(file_path: &str) -> Result<Vec<Pattern>> {
-    let content = fs::read_to_string(file_path)?;
-    content
-        .lines()
-        .map(|line| Pattern::new(line).map_err(|e| anyhow!(e)))
-        .collect()
 }
 
 fn get_staged_diffs(filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
@@ -114,15 +173,27 @@ fn get_staged_diffs(filter_patterns: Option<&Vec<Pattern>>) -> Result<String> {
     String::from_utf8(diff_output.stdout).map_err(|e| anyhow!(e))
 }
 
-async fn generate_commit_message(diffs: &str) -> Result<String> {
-    let client = Client::new();
+async fn generate_commit_message(
+    client: &Client<impl async_openai::config::Config>,
+    diffs: &str,
+    model: &str,
+    language: Option<&str>,
+) -> Result<String> {
     let user_content = format!("# Diffs:\n{}", diffs);
 
+    let language_instruction = if let Some(lang) = language {
+        format!("\n- Is written in {}.", lang)
+    } else {
+        String::new()
+    };
+
+    let system_prompt = SYSTEM_PROMPT.replace("{language_instruction}", &language_instruction);
+
     let request = CreateChatCompletionRequestArgs::default()
-        .model("deepseek-v3-1")
+        .model(model)
         .messages([
             ChatCompletionRequestSystemMessageArgs::default()
-                .content(SYSTEM_PROMPT)
+                .content(system_prompt)
                 .build()?
                 .into(),
             ChatCompletionRequestUserMessageArgs::default()
