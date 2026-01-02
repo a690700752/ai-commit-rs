@@ -17,14 +17,14 @@
 Ensure you have [Rust and Cargo](https://rustup.rs/) installed:
 
 ```bash
-git clone https://github.com/yourusername/ai-commit-rs.git
+git clone https://github.com/a690700752/ai-commit-rs.git
 cd ai-commit-rs
 cargo install --path .
 ```
 
 ### Pre-built Binaries
 
-You can download pre-built binaries for your platform from the [Releases](https://github.com/yourusername/ai-commit-rs/releases) page.
+You can download pre-built binaries for your platform from the [Releases](https://github.com/a690700752/ai-commit-rs/releases) page.
 
 ## 🛠 Usage
 
