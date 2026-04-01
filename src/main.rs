@@ -211,7 +211,13 @@ fn get_staged_diffs(git_root: &str, filter_patterns: Option<&Vec<Pattern>>) -> R
         ));
     }
 
-    String::from_utf8(diff_output.stdout).map_err(|e| anyhow!(e))
+    let diff_content = String::from_utf8(diff_output.stdout).map_err(|e| anyhow!(e))?;
+
+    if diff_content.trim().is_empty() && !filtered_files.is_empty() {
+        return Ok(format!("Staged files:\n{}", filtered_files.join("\n")));
+    }
+
+    Ok(diff_content)
 }
 async fn generate_commit_message(
     client: &Client<impl async_openai::config::Config>,
@@ -221,12 +227,13 @@ async fn generate_commit_message(
 ) -> Result<(String, Option<CompletionUsage>)> {
     let user_content = format!("# Diffs:\n{}", diffs);
 
-    const MAX_CONTENT_LENGTH: usize = 8000;
+    const MAX_TOKENS_THRESHOLD: usize = 4000;
+    let approx_tokens = user_content.len() / 4;
 
-    if user_content.len() > MAX_CONTENT_LENGTH {
+    if approx_tokens > MAX_TOKENS_THRESHOLD {
         print!(
-            "The staged diff is large ({} characters). It may consume a lot of tokens and take a long time. Do you want to continue? (y/N) ",
-            user_content.len()
+            "The staged diff is large (approximately {} tokens). It may consume a lot of tokens and take a long time. Do you want to continue? (y/N) ",
+            approx_tokens
         );
         io::stdout().flush()?;
         let mut input = String::new();
