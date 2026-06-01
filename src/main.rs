@@ -1,3 +1,5 @@
+mod cache;
+
 use anyhow::{anyhow, Result};
 use async_openai::{
     types::chat::{
@@ -139,10 +141,21 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
     let model = &config.model;
     let language = config.language.as_deref();
 
-    let client = Client::new();
+    // Only compute hash when cache exists (to compare) or on failure (to save)
+    let cached = cache::load();
+    let diff_hash = cached.as_ref().map(|_| cache::compute_diff_hash(&diffs));
 
-    let (commit_msg, usage) = generate_commit_message(&client, &diffs, model, language).await?;
-    // println!("\nGenerated commit message: {}", commit_msg);
+    let (commit_msg, usage, from_cache) = match (&cached, &diff_hash) {
+        (Some(c), Some(hash)) if c.hash == *hash => {
+            println!("Cache hit, skipping LLM.");
+            (c.message.clone(), None, true)
+        }
+        _ => {
+            let client = Client::new();
+            let (msg, usage) = generate_commit_message(&client, &diffs, model, language).await?;
+            (msg, usage, false)
+        }
+    };
 
     if let Some(usage) = usage {
         println!(
@@ -151,8 +164,20 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
         );
     }
 
-    let (commit_hash, commit_message) = perform_commit(&git_root, &commit_msg, no_verify)?;
-    println!("Commit {} {}", commit_hash, commit_message);
+    match perform_commit(&git_root, &commit_msg, no_verify) {
+        Ok((commit_hash, commit_message)) => {
+            println!("Commit {} {}", commit_hash, commit_message);
+            if from_cache {
+                cache::clear();
+            }
+        }
+        Err(e) => {
+            let hash = diff_hash.unwrap_or_else(|| cache::compute_diff_hash(&diffs));
+            cache::save(&hash, &commit_msg)?;
+            println!("Commit failed, cached message for next attempt.");
+            return Err(e);
+        }
+    }
 
     Ok(())
 }
