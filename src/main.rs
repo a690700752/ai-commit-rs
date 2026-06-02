@@ -145,15 +145,15 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
     let cached = cache::load();
     let diff_hash = cached.as_ref().map(|_| cache::compute_diff_hash(&diffs));
 
-    let (commit_msg, usage, from_cache) = match (&cached, &diff_hash) {
+    let (commit_msg, usage) = match (&cached, &diff_hash) {
         (Some(c), Some(hash)) if c.hash == *hash => {
             println!("Cache hit, skipping LLM.");
-            (c.message.clone(), None, true)
+            (c.message.clone(), None)
         }
         _ => {
             let client = Client::new();
             let (msg, usage) = generate_commit_message(&client, &diffs, model, language).await?;
-            (msg, usage, false)
+            (msg, usage)
         }
     };
 
@@ -167,9 +167,7 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
     match perform_commit(&git_root, &commit_msg, no_verify) {
         Ok((commit_hash, commit_message)) => {
             println!("Commit {} {}", commit_hash, commit_message);
-            if from_cache {
-                cache::clear();
-            }
+            cache::clear();
         }
         Err(e) => {
             let hash = diff_hash.unwrap_or_else(|| cache::compute_diff_hash(&diffs));
