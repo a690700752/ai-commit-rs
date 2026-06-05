@@ -1,3 +1,5 @@
+mod cache;
+
 use anyhow::{anyhow, Result};
 use async_openai::{
     types::chat::{
@@ -139,10 +141,21 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
     let model = &config.model;
     let language = config.language.as_deref();
 
-    let client = Client::new();
+    // Only compute hash when cache exists (to compare) or on failure (to save)
+    let cached = cache::load();
+    let diff_hash = cached.as_ref().map(|_| cache::compute_diff_hash(&diffs));
 
-    let (commit_msg, usage) = generate_commit_message(&client, &diffs, model, language).await?;
-    // println!("\nGenerated commit message: {}", commit_msg);
+    let (commit_msg, usage) = match (&cached, &diff_hash) {
+        (Some(c), Some(hash)) if c.hash == *hash => {
+            println!("Cache hit, skipping LLM.");
+            (c.message.clone(), None)
+        }
+        _ => {
+            let client = Client::new();
+            let (msg, usage) = generate_commit_message(&client, &diffs, model, language).await?;
+            (msg, usage)
+        }
+    };
 
     if let Some(usage) = usage {
         println!(
@@ -151,8 +164,18 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
         );
     }
 
-    let (commit_hash, commit_message) = perform_commit(&git_root, &commit_msg, no_verify)?;
-    println!("Commit {} {}", commit_hash, commit_message);
+    match perform_commit(&git_root, &commit_msg, no_verify) {
+        Ok((commit_hash, commit_message)) => {
+            println!("Commit {} {}", commit_hash, commit_message);
+            cache::clear();
+        }
+        Err(e) => {
+            let hash = diff_hash.unwrap_or_else(|| cache::compute_diff_hash(&diffs));
+            cache::save(&hash, &commit_msg)?;
+            println!("Commit failed, cached message for next attempt.");
+            return Err(e);
+        }
+    }
 
     Ok(())
 }
@@ -211,7 +234,13 @@ fn get_staged_diffs(git_root: &str, filter_patterns: Option<&Vec<Pattern>>) -> R
         ));
     }
 
-    String::from_utf8(diff_output.stdout).map_err(|e| anyhow!(e))
+    let diff_content = String::from_utf8(diff_output.stdout).map_err(|e| anyhow!(e))?;
+
+    if diff_content.trim().is_empty() && !filtered_files.is_empty() {
+        return Ok(format!("Staged files:\n{}", filtered_files.join("\n")));
+    }
+
+    Ok(diff_content)
 }
 async fn generate_commit_message(
     client: &Client<impl async_openai::config::Config>,
@@ -221,12 +250,13 @@ async fn generate_commit_message(
 ) -> Result<(String, Option<CompletionUsage>)> {
     let user_content = format!("# Diffs:\n{}", diffs);
 
-    const MAX_CONTENT_LENGTH: usize = 8000;
+    const MAX_TOKENS_THRESHOLD: usize = 4000;
+    let approx_tokens = user_content.len() / 4;
 
-    if user_content.len() > MAX_CONTENT_LENGTH {
+    if approx_tokens > MAX_TOKENS_THRESHOLD {
         print!(
-            "The staged diff is large ({} characters). It may consume a lot of tokens and take a long time. Do you want to continue? (y/N) ",
-            user_content.len()
+            "The staged diff is large (approximately {} tokens). It may consume a lot of tokens and take a long time. Do you want to continue? (y/N) ",
+            approx_tokens
         );
         io::stdout().flush()?;
         let mut input = String::new();
