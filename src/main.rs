@@ -16,7 +16,7 @@ use std::io::{self, Write};
 use std::process::Command;
 use std::str;
 
-fn format_thousands(n: usize) -> String {
+fn format_thousands(n: impl ToString) -> String {
     let s = n.to_string();
     let len = s.len();
     let mut result = String::with_capacity(len + (len - 1) / 3);
@@ -173,7 +173,9 @@ async fn run(config: &Config, no_verify: bool) -> Result<()> {
     if let Some(usage) = usage {
         println!(
             "Tokens used: {}, input tokens: {}, output tokens: {}",
-            usage.total_tokens, usage.prompt_tokens, usage.completion_tokens
+            format_thousands(usage.total_tokens),
+            format_thousands(usage.prompt_tokens),
+            format_thousands(usage.completion_tokens)
         );
     }
 
