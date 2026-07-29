@@ -16,6 +16,19 @@ use std::io::{self, Write};
 use std::process::Command;
 use std::str;
 
+fn format_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let len = s.len();
+    let mut result = String::with_capacity(len + (len - 1) / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
+}
+
 const SYSTEM_PROMPT: &str = r#"You are an expert software engineer that generates concise, one-line Git commit messages based on the provided diffs.
 Review the provided context and diffs which are about to be committed to a git repo.
 Review the diffs carefully.
@@ -256,7 +269,7 @@ async fn generate_commit_message(
     if approx_tokens > MAX_TOKENS_THRESHOLD {
         print!(
             "The staged diff is large (approximately {} tokens). It may consume a lot of tokens and take a long time. Do you want to continue? (y/N) ",
-            approx_tokens
+            format_thousands(approx_tokens)
         );
         io::stdout().flush()?;
         let mut input = String::new();
